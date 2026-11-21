@@ -67,7 +67,7 @@ async function startServer() {
                 };
 
                 if (image !== undefined) {
-                    updateFields.image = image.trim();
+                    updateFields.image = String(image).trim();
                 }
 
                 await db
