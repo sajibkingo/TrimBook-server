@@ -3,6 +3,7 @@ import "dotenv/config";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import { createVerifyToken } from "./middlewares/verifyToken.js";
+import { verifyAdmin } from "./middlewares/verifyAdmin.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,6 +32,61 @@ async function startServer() {
 
         app.get("/", (req, res) => {
             res.send("TrimBook API Server is running!");
+        });
+
+        app.get("/api/auth/me", verifyToken, (req, res) => {
+            res.json({
+                _id: req.user._id,
+                name: req.user.name,
+                email: req.user.email,
+                image: req.user.image,
+                role: req.user.role,
+                isBlocked: req.user.isBlocked,
+                phone: req.user.phone || "",
+            });
+        });
+
+        app.patch("/api/users/profile", verifyToken, async (req, res) => {
+            try {
+                const { name, phone, image } = req.body;
+
+                if (!name || !name.trim()) {
+                    return res.status(400).json({ message: "Full name is required" });
+                }
+
+                const updateFields = {
+                    name: name.trim(),
+                    phone: phone ? phone.trim() : "",
+                    updatedAt: new Date(),
+                };
+
+                if (image !== undefined) {
+                    updateFields.image = image.trim();
+                }
+
+                await db
+                    .collection("user")
+                    .updateOne({ _id: req.user._id }, { $set: updateFields });
+
+                const updatedUser = await db
+                    .collection("user")
+                    .findOne({ _id: req.user._id });
+
+                res.json({
+                    message: "Profile updated successfully!",
+                    user: {
+                        _id: updatedUser._id,
+                        name: updatedUser.name,
+                        email: updatedUser.email,
+                        image: updatedUser.image || "",
+                        phone: updatedUser.phone || "",
+                        role: updatedUser.role,
+                        isBlocked: updatedUser.isBlocked,
+                    },
+                });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to update profile" });
+            }
         });
 
         app.get("/api/services", async (req, res) => {
@@ -126,7 +182,8 @@ async function startServer() {
 
                 if (existingConflict) {
                     return res.status(409).json({
-                        message: "This time slot is already booked for the selected date. Please choose another slot.",
+                        message:
+                            "This time slot is already booked for the selected date. Please choose another slot.",
                     });
                 }
 
@@ -150,6 +207,155 @@ async function startServer() {
                 });
             } catch (error) {
                 res.status(500).json({ message: "Failed to submit appointment request" });
+            }
+        });
+
+        app.get("/api/dashboard/stats", verifyToken, async (req, res) => {
+            try {
+                if (req.user.role === "admin") {
+                    const [
+                        totalCustomers,
+                        activeServices,
+                        totalAppointments,
+                        pendingAppointments,
+                        confirmedAppointments,
+                        paidTransactions,
+                    ] = await Promise.all([
+                        db.collection("user").countDocuments({ role: "customer" }),
+                        servicesCollection.countDocuments({ status: "active" }),
+                        appointmentsCollection.countDocuments(),
+                        appointmentsCollection.countDocuments({ status: "pending" }),
+                        appointmentsCollection.countDocuments({ status: "confirmed" }),
+                        db.collection("transactions").find({ paymentStatus: "paid" }).toArray(),
+                    ]);
+
+                    const totalRevenue = paidTransactions.reduce(
+                        (sum, tx) => sum + (Number(tx.amount) || 0),
+                        0
+                    );
+
+                    return res.json({
+                        role: "admin",
+                        totalCustomers,
+                        activeServices,
+                        totalAppointments,
+                        pendingAppointments,
+                        confirmedAppointments,
+                        totalRevenue,
+                        successfulPaymentsCount: paidTransactions.length,
+                    });
+                }
+
+                const customerId = req.user._id;
+                const [totalRequests, pendingCount, confirmedCount, cancelledCount] =
+                    await Promise.all([
+                        appointmentsCollection.countDocuments({ customerId }),
+                        appointmentsCollection.countDocuments({ customerId, status: "pending" }),
+                        appointmentsCollection.countDocuments({ customerId, status: "confirmed" }),
+                        appointmentsCollection.countDocuments({ customerId, status: "cancelled" }),
+                    ]);
+
+                res.json({
+                    role: "customer",
+                    totalRequests,
+                    pendingCount,
+                    confirmedCount,
+                    cancelledCount,
+                });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to load dashboard statistics" });
+            }
+        });
+
+        app.get("/api/appointments/my", verifyToken, async (req, res) => {
+            try {
+                if (req.user.role === "admin") {
+                    return res.status(403).json({
+                        message: "Forbidden: Customers only",
+                    });
+                }
+
+                const appointments = await appointmentsCollection
+                    .aggregate([
+                        { $match: { customerId: req.user._id } },
+                        { $sort: { createdAt: -1 } },
+                        {
+                            $lookup: {
+                                from: "services",
+                                localField: "serviceId",
+                                foreignField: "_id",
+                                as: "serviceInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$serviceInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                        {
+                            $lookup: {
+                                from: "transactions",
+                                localField: "_id",
+                                foreignField: "appointmentId",
+                                as: "transactionInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$transactionInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                    ])
+                    .toArray();
+
+                res.json(appointments);
+            } catch (error) {
+                res.status(500).json({ message: "Failed to load your appointments" });
+            }
+        });
+
+        app.patch("/api/appointments/:id/cancel", verifyToken, async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid appointment ID" });
+                }
+
+                const appointment = await appointmentsCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!appointment) {
+                    return res.status(404).json({ message: "Appointment not found" });
+                }
+
+                if (String(appointment.customerId) !== String(req.user._id)) {
+                    return res.status(403).json({
+                        message: "Unauthorized: You can only cancel your own appointments",
+                    });
+                }
+
+                if (appointment.status !== "pending") {
+                    return res.status(400).json({
+                        message: `Cannot cancel an appointment that is already ${appointment.status}`,
+                    });
+                }
+
+                await appointmentsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            status: "cancelled",
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.json({ message: "Appointment request cancelled successfully" });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to cancel appointment" });
             }
         });
 

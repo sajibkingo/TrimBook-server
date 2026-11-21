@@ -8,7 +8,7 @@ export function createVerifyToken(db) {
         try {
             const authHeader = req.headers.authorization;
             if (!authHeader || !authHeader.startsWith("Bearer ")) {
-                return res.status(401).json({ message: "Unauthorized: No token provided" });
+                return res.status(401).json({ message: "Unauthorized: Missing Bearer token" });
             }
 
             const token = authHeader.split(" ")[1];
@@ -19,17 +19,17 @@ export function createVerifyToken(db) {
 
             const user = await db.collection("user").findOne({ email: payload.email });
             if (!user) {
-                return res.status(401).json({ message: "Unauthorized: User not found" });
+                return res.status(401).json({ message: "Unauthorized: User does not exist" });
             }
 
             if (user.isBlocked) {
-                return res.status(403).json({ message: "Access denied: Your account has been blocked" });
+                return res.status(403).json({ message: "Forbidden: Your account has been blocked" });
             }
 
             req.user = user;
             next();
         } catch (error) {
-            return res.status(401).json({ message: "Unauthorized: Invalid or expired token" });
+            return res.status(401).json({ message: "Unauthorized: Invalid or expired JWT" });
         }
     };
 }
