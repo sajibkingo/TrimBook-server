@@ -34,12 +34,15 @@ async function startServer() {
             res.send("TrimBook API Server is running!");
         });
 
+        // ==========================================
+        // AUTH & PROFILE ROUTES
+        // ==========================================
         app.get("/api/auth/me", verifyToken, (req, res) => {
             res.json({
                 _id: req.user._id,
                 name: req.user.name,
                 email: req.user.email,
-                image: req.user.image,
+                image: req.user.image || "",
                 role: req.user.role,
                 isBlocked: req.user.isBlocked,
                 phone: req.user.phone || "",
@@ -89,6 +92,9 @@ async function startServer() {
             }
         });
 
+        // ==========================================
+        // SERVICES ROUTES (PUBLIC & ADMIN CRUD)
+        // ==========================================
         app.get("/api/services", async (req, res) => {
             try {
                 const { search, category, sort, all } = req.query;
@@ -314,11 +320,38 @@ async function startServer() {
             }
         });
 
+        // ==========================================
+        // APPOINTMENTS ROUTES (CUSTOMER & ADMIN)
+        // ==========================================
+        app.get("/api/appointments/booked-slots", verifyToken, async (req, res) => {
+            try {
+                const { serviceId, date } = req.query;
+
+                if (!serviceId || !ObjectId.isValid(serviceId) || !date) {
+                    return res.json([]);
+                }
+
+                const bookedAppointments = await appointmentsCollection
+                    .find({
+                        serviceId: new ObjectId(serviceId),
+                        appointmentDate: date,
+                        status: { $in: ["pending", "confirmed"] },
+                    })
+                    .project({ timeSlot: 1, _id: 0 })
+                    .toArray();
+
+                const bookedSlots = bookedAppointments.map((item) => item.timeSlot);
+                res.json(bookedSlots);
+            } catch (error) {
+                res.status(500).json({ message: "Failed to check booked time slots" });
+            }
+        });
+
         app.post("/api/appointments", verifyToken, async (req, res) => {
             try {
-                if (req.user.role === "admin") {
+                if (req.user.role !== "customer") {
                     return res.status(403).json({
-                        message: "Admins cannot submit customer appointment requests",
+                        message: "Only authenticated customers can submit appointment requests",
                     });
                 }
 
@@ -344,7 +377,7 @@ async function startServer() {
 
                 if (service.status !== "active") {
                     return res.status(400).json({
-                        message: "This service is currently inactive and unavailable for booking",
+                        message: "This service is currently inactive and cannot be booked",
                     });
                 }
 
@@ -358,7 +391,7 @@ async function startServer() {
                 if (existingConflict) {
                     return res.status(409).json({
                         message:
-                            "This time slot is already booked for the selected date. Please choose another slot.",
+                            "This time slot is already booked for the selected date. Please select another slot.",
                     });
                 }
 
@@ -382,63 +415,6 @@ async function startServer() {
                 });
             } catch (error) {
                 res.status(500).json({ message: "Failed to submit appointment request" });
-            }
-        });
-
-        app.get("/api/dashboard/stats", verifyToken, async (req, res) => {
-            try {
-                if (req.user.role === "admin") {
-                    const [
-                        totalCustomers,
-                        activeServices,
-                        totalAppointments,
-                        pendingAppointments,
-                        confirmedAppointments,
-                        paidTransactions,
-                    ] = await Promise.all([
-                        db.collection("user").countDocuments({ role: "customer" }),
-                        servicesCollection.countDocuments({ status: "active" }),
-                        appointmentsCollection.countDocuments(),
-                        appointmentsCollection.countDocuments({ status: "pending" }),
-                        appointmentsCollection.countDocuments({ status: "confirmed" }),
-                        db.collection("transactions").find({ paymentStatus: "paid" }).toArray(),
-                    ]);
-
-                    const totalRevenue = paidTransactions.reduce(
-                        (sum, tx) => sum + (Number(tx.amount) || 0),
-                        0
-                    );
-
-                    return res.json({
-                        role: "admin",
-                        totalCustomers,
-                        activeServices,
-                        totalAppointments,
-                        pendingAppointments,
-                        confirmedAppointments,
-                        totalRevenue,
-                        successfulPaymentsCount: paidTransactions.length,
-                    });
-                }
-
-                const customerId = req.user._id;
-                const [totalRequests, pendingCount, confirmedCount, cancelledCount] =
-                    await Promise.all([
-                        appointmentsCollection.countDocuments({ customerId }),
-                        appointmentsCollection.countDocuments({ customerId, status: "pending" }),
-                        appointmentsCollection.countDocuments({ customerId, status: "confirmed" }),
-                        appointmentsCollection.countDocuments({ customerId, status: "cancelled" }),
-                    ]);
-
-                res.json({
-                    role: "customer",
-                    totalRequests,
-                    pendingCount,
-                    confirmedCount,
-                    cancelledCount,
-                });
-            } catch (error) {
-                res.status(500).json({ message: "Failed to load dashboard statistics" });
             }
         });
 
@@ -628,6 +604,66 @@ async function startServer() {
                 res.json({ message: `Appointment marked as ${status}` });
             } catch (error) {
                 res.status(500).json({ message: "Failed to update appointment status" });
+            }
+        });
+
+        // ==========================================
+        // DASHBOARD STATS, USERS & TRANSACTIONS
+        // ==========================================
+        app.get("/api/dashboard/stats", verifyToken, async (req, res) => {
+            try {
+                if (req.user.role === "admin") {
+                    const [
+                        totalCustomers,
+                        activeServices,
+                        totalAppointments,
+                        pendingAppointments,
+                        confirmedAppointments,
+                        paidTransactions,
+                    ] = await Promise.all([
+                        db.collection("user").countDocuments({ role: "customer" }),
+                        servicesCollection.countDocuments({ status: "active" }),
+                        appointmentsCollection.countDocuments(),
+                        appointmentsCollection.countDocuments({ status: "pending" }),
+                        appointmentsCollection.countDocuments({ status: "confirmed" }),
+                        db.collection("transactions").find({ paymentStatus: "paid" }).toArray(),
+                    ]);
+
+                    const totalRevenue = paidTransactions.reduce(
+                        (sum, tx) => sum + (Number(tx.amount) || 0),
+                        0
+                    );
+
+                    return res.json({
+                        role: "admin",
+                        totalCustomers,
+                        activeServices,
+                        totalAppointments,
+                        pendingAppointments,
+                        confirmedAppointments,
+                        totalRevenue,
+                        successfulPaymentsCount: paidTransactions.length,
+                    });
+                }
+
+                const customerId = req.user._id;
+                const [totalRequests, pendingCount, confirmedCount, cancelledCount] =
+                    await Promise.all([
+                        appointmentsCollection.countDocuments({ customerId }),
+                        appointmentsCollection.countDocuments({ customerId, status: "pending" }),
+                        appointmentsCollection.countDocuments({ customerId, status: "confirmed" }),
+                        appointmentsCollection.countDocuments({ customerId, status: "cancelled" }),
+                    ]);
+
+                res.json({
+                    role: "customer",
+                    totalRequests,
+                    pendingCount,
+                    confirmedCount,
+                    cancelledCount,
+                });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to load dashboard statistics" });
             }
         });
 
