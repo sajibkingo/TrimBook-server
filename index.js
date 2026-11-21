@@ -1,6 +1,7 @@
 import express from "express";
 import "dotenv/config";
 import cors from "cors";
+import Stripe from "stripe";
 import { MongoClient, ObjectId } from "mongodb";
 import { createVerifyToken } from "./middlewares/verifyToken.js";
 import { verifyAdmin } from "./middlewares/verifyAdmin.js";
@@ -27,7 +28,9 @@ async function startServer() {
         const db = client.db("trimbook");
         const servicesCollection = db.collection("services");
         const appointmentsCollection = db.collection("appointments");
+        const transactionsCollection = db.collection("transactions");
 
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
         const verifyToken = createVerifyToken(db);
 
         app.get("/", (req, res) => {
@@ -626,7 +629,7 @@ async function startServer() {
                         appointmentsCollection.countDocuments(),
                         appointmentsCollection.countDocuments({ status: "pending" }),
                         appointmentsCollection.countDocuments({ status: "confirmed" }),
-                        db.collection("transactions").find({ paymentStatus: "paid" }).toArray(),
+                        transactionsCollection.find({ paymentStatus: "paid" }).toArray(),
                     ]);
 
                     const totalRevenue = paidTransactions.reduce(
@@ -745,8 +748,7 @@ async function startServer() {
 
         app.get("/api/transactions", verifyToken, verifyAdmin, async (req, res) => {
             try {
-                const transactions = await db
-                    .collection("transactions")
+                const transactions = await transactionsCollection
                     .aggregate([
                         { $sort: { createdAt: -1, paidAt: -1 } },
                         {
@@ -797,6 +799,166 @@ async function startServer() {
                 res.json(transactions);
             } catch (error) {
                 res.status(500).json({ message: "Failed to fetch transactions" });
+            }
+        });
+
+        // ==========================================
+        // STRIPE PAYMENT ROUTES
+        // ==========================================
+        app.post("/api/payments/create-checkout-session", verifyToken, async (req, res) => {
+            try {
+                if (req.user.role !== "customer") {
+                    return res.status(403).json({
+                        message: "Only customers can pay for appointments",
+                    });
+                }
+
+                const { appointmentId } = req.body;
+                if (!appointmentId || !ObjectId.isValid(appointmentId)) {
+                    return res.status(400).json({ message: "Invalid appointment ID" });
+                }
+
+                const appointment = await appointmentsCollection.findOne({
+                    _id: new ObjectId(appointmentId),
+                });
+
+                if (!appointment) {
+                    return res.status(404).json({ message: "Appointment not found" });
+                }
+
+                if (String(appointment.customerId) !== String(req.user._id)) {
+                    return res.status(403).json({
+                        message: "Unauthorized: You can only pay for your own appointments",
+                    });
+                }
+
+                if (appointment.status !== "confirmed") {
+                    return res.status(400).json({
+                        message: `Cannot pay for an appointment with status: ${appointment.status}. It must be confirmed first.`,
+                    });
+                }
+
+                if (appointment.paymentStatus === "paid") {
+                    return res.status(400).json({
+                        message: "This appointment has already been paid.",
+                    });
+                }
+
+                const service = await servicesCollection.findOne({
+                    _id: new ObjectId(appointment.serviceId),
+                });
+
+                const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+                const amountInCents = Math.round(Number(appointment.servicePrice) * 100);
+
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ["card"],
+                    mode: "payment",
+                    customer_email: req.user.email,
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: "usd",
+                                product_data: {
+                                    name: service?.serviceName || "Salon Appointment Service",
+                                    description: `Appointment on ${appointment.appointmentDate} at ${appointment.timeSlot}`,
+                                },
+                                unit_amount: amountInCents,
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    metadata: {
+                        appointmentId: String(appointment._id),
+                        customerId: String(req.user._id),
+                        serviceId: String(appointment.serviceId),
+                    },
+                    success_url: `${clientUrl}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `${clientUrl}/dashboard/my-appointments`,
+                });
+
+                res.json({ url: session.url, sessionId: session.id });
+            } catch (error) {
+                console.error("Stripe checkout error:", error);
+                res.status(500).json({ message: "Failed to initialize Stripe checkout" });
+            }
+        });
+
+        app.post("/api/payments/verify-session", verifyToken, async (req, res) => {
+            try {
+                const { sessionId } = req.body;
+                if (!sessionId) {
+                    return res.status(400).json({ message: "Stripe session ID is required" });
+                }
+
+                const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+                if (!session || session.payment_status !== "paid") {
+                    return res.status(400).json({
+                        message: "Payment has not been completed or verified by Stripe.",
+                    });
+                }
+
+                const appointmentId = session.metadata?.appointmentId;
+                const customerId = session.metadata?.customerId;
+
+                if (!appointmentId || !ObjectId.isValid(appointmentId)) {
+                    return res.status(400).json({ message: "Invalid appointment metadata" });
+                }
+
+                if (String(customerId) !== String(req.user._id)) {
+                    return res.status(403).json({
+                        message: "Unauthorized: Payment session does not belong to you",
+                    });
+                }
+
+                const existingTransaction = await transactionsCollection.findOne({
+                    stripeSessionId: session.id,
+                });
+
+                if (existingTransaction) {
+                    return res.json({
+                        message: "Payment already verified",
+                        transaction: existingTransaction,
+                    });
+                }
+
+                const paidAt = new Date();
+                const transactionRecord = {
+                    appointmentId: new ObjectId(appointmentId),
+                    customerId: req.user._id,
+                    amount: Number(session.amount_total || 0) / 100,
+                    currency: (session.currency || "usd").toUpperCase(),
+                    stripeSessionId: session.id,
+                    transactionId: session.payment_intent || session.id,
+                    paymentStatus: "paid",
+                    paidAt,
+                    createdAt: paidAt,
+                };
+
+                const insertResult = await transactionsCollection.insertOne(transactionRecord);
+
+                await appointmentsCollection.updateOne(
+                    { _id: new ObjectId(appointmentId) },
+                    {
+                        $set: {
+                            paymentStatus: "paid",
+                            paidAt,
+                            updatedAt: paidAt,
+                        },
+                    }
+                );
+
+                res.json({
+                    message: "Payment verified and transaction recorded!",
+                    transaction: {
+                        _id: insertResult.insertedId,
+                        ...transactionRecord,
+                    },
+                });
+            } catch (error) {
+                console.error("Stripe verification error:", error);
+                res.status(500).json({ message: "Failed to verify payment session" });
             }
         });
 
