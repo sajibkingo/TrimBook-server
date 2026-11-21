@@ -139,6 +139,181 @@ async function startServer() {
             }
         });
 
+        app.post("/api/services", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const {
+                    serviceName,
+                    category,
+                    description,
+                    price,
+                    duration,
+                    image,
+                    status,
+                } = req.body;
+
+                if (!serviceName || !serviceName.trim()) {
+                    return res.status(400).json({ message: "Service name is required" });
+                }
+                if (!category || !category.trim()) {
+                    return res.status(400).json({ message: "Service category is required" });
+                }
+                if (!description || !description.trim()) {
+                    return res.status(400).json({ message: "Description is required" });
+                }
+                if (!image || !image.trim()) {
+                    return res.status(400).json({ message: "Service image is required" });
+                }
+
+                const numericPrice = Number(price);
+                const numericDuration = Number(duration);
+
+                if (isNaN(numericPrice) || numericPrice <= 0) {
+                    return res.status(400).json({ message: "Price must be a positive number" });
+                }
+                if (isNaN(numericDuration) || numericDuration <= 0) {
+                    return res.status(400).json({ message: "Duration must be a positive number" });
+                }
+
+                const validStatus = status === "inactive" ? "inactive" : "active";
+
+                const newService = {
+                    serviceName: serviceName.trim(),
+                    category: category.trim(),
+                    description: description.trim(),
+                    price: numericPrice,
+                    duration: numericDuration,
+                    image: image.trim(),
+                    status: validStatus,
+                    createdBy: req.user._id,
+                    createdAt: new Date(),
+                };
+
+                const result = await servicesCollection.insertOne(newService);
+
+                res.status(201).json({
+                    message: "Salon service created successfully!",
+                    serviceId: result.insertedId,
+                });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to create service" });
+            }
+        });
+
+        app.patch("/api/services/:id", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid service ID" });
+                }
+
+                const {
+                    serviceName,
+                    category,
+                    description,
+                    price,
+                    duration,
+                    image,
+                    status,
+                } = req.body;
+
+                if (!serviceName || !serviceName.trim()) {
+                    return res.status(400).json({ message: "Service name is required" });
+                }
+                if (!category || !category.trim()) {
+                    return res.status(400).json({ message: "Service category is required" });
+                }
+                if (!description || !description.trim()) {
+                    return res.status(400).json({ message: "Description is required" });
+                }
+
+                const numericPrice = Number(price);
+                const numericDuration = Number(duration);
+
+                if (isNaN(numericPrice) || numericPrice <= 0) {
+                    return res.status(400).json({ message: "Price must be a positive number" });
+                }
+                if (isNaN(numericDuration) || numericDuration <= 0) {
+                    return res.status(400).json({ message: "Duration must be a positive number" });
+                }
+
+                const updateDoc = {
+                    serviceName: serviceName.trim(),
+                    category: category.trim(),
+                    description: description.trim(),
+                    price: numericPrice,
+                    duration: numericDuration,
+                    status: status === "inactive" ? "inactive" : "active",
+                    updatedAt: new Date(),
+                };
+
+                if (image && image.trim()) {
+                    updateDoc.image = image.trim();
+                }
+
+                const result = await servicesCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateDoc }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ message: "Service not found" });
+                }
+
+                res.json({ message: "Service updated successfully!" });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to update service" });
+            }
+        });
+
+        app.patch("/api/services/:id/status", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { status } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid service ID" });
+                }
+
+                if (status !== "active" && status !== "inactive") {
+                    return res.status(400).json({ message: "Status must be active or inactive" });
+                }
+
+                const result = await servicesCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status, updatedAt: new Date() } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ message: "Service not found" });
+                }
+
+                res.json({ message: `Service marked as ${status}` });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to update service status" });
+            }
+        });
+
+        app.delete("/api/services/:id", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid service ID" });
+                }
+
+                const result = await servicesCollection.deleteOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ message: "Service not found" });
+                }
+
+                res.json({ message: "Service deleted successfully" });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to delete service" });
+            }
+        });
+
         app.post("/api/appointments", verifyToken, async (req, res) => {
             try {
                 if (req.user.role === "admin") {
