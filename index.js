@@ -534,6 +534,236 @@ async function startServer() {
             }
         });
 
+        app.get("/api/appointments", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const appointments = await appointmentsCollection
+                    .aggregate([
+                        { $sort: { createdAt: -1 } },
+                        {
+                            $lookup: {
+                                from: "services",
+                                localField: "serviceId",
+                                foreignField: "_id",
+                                as: "serviceInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$serviceInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                        {
+                            $lookup: {
+                                from: "user",
+                                localField: "customerId",
+                                foreignField: "_id",
+                                as: "customerInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$customerInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                    ])
+                    .toArray();
+
+                res.json(appointments);
+            } catch (error) {
+                res.status(500).json({ message: "Failed to load all appointments" });
+            }
+        });
+
+        app.patch("/api/appointments/:id/status", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { status } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid appointment ID" });
+                }
+
+                if (status !== "confirmed" && status !== "cancelled") {
+                    return res.status(400).json({
+                        message: "Status must be either confirmed or cancelled",
+                    });
+                }
+
+                const appointment = await appointmentsCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!appointment) {
+                    return res.status(404).json({ message: "Appointment not found" });
+                }
+
+                if (status === "confirmed" && appointment.status !== "pending") {
+                    return res.status(400).json({
+                        message: `Only pending appointments can be confirmed (current: ${appointment.status})`,
+                    });
+                }
+
+                if (
+                    status === "cancelled" &&
+                    appointment.status !== "pending" &&
+                    appointment.status !== "confirmed"
+                ) {
+                    return res.status(400).json({
+                        message: `Cannot cancel an appointment that is already ${appointment.status}`,
+                    });
+                }
+
+                await appointmentsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            status,
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.json({ message: `Appointment marked as ${status}` });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to update appointment status" });
+            }
+        });
+
+        app.get("/api/users", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const customers = await db
+                    .collection("user")
+                    .aggregate([
+                        { $match: { role: "customer" } },
+                        { $sort: { createdAt: -1 } },
+                        {
+                            $lookup: {
+                                from: "appointments",
+                                localField: "_id",
+                                foreignField: "customerId",
+                                as: "userAppointments",
+                            },
+                        },
+                        {
+                            $addFields: {
+                                appointmentCount: { $size: "$userAppointments" },
+                            },
+                        },
+                        {
+                            $project: {
+                                userAppointments: 0,
+                            },
+                        },
+                    ])
+                    .toArray();
+
+                res.json(customers);
+            } catch (error) {
+                res.status(500).json({ message: "Failed to fetch registered customers" });
+            }
+        });
+
+        app.patch("/api/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { isBlocked } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid user ID" });
+                }
+
+                if (typeof isBlocked !== "boolean") {
+                    return res.status(400).json({ message: "isBlocked must be a boolean" });
+                }
+
+                const targetUser = await db
+                    .collection("user")
+                    .findOne({ _id: new ObjectId(id) });
+
+                if (!targetUser) {
+                    return res.status(404).json({ message: "User not found" });
+                }
+
+                if (targetUser.role === "admin") {
+                    return res.status(403).json({
+                        message: "Cannot block an administrator account",
+                    });
+                }
+
+                await db.collection("user").updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { isBlocked, updatedAt: new Date() } }
+                );
+
+                res.json({
+                    message: isBlocked
+                        ? "Customer account has been blocked"
+                        : "Customer account has been unblocked",
+                });
+            } catch (error) {
+                res.status(500).json({ message: "Failed to update user block status" });
+            }
+        });
+
+        app.get("/api/transactions", verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const transactions = await db
+                    .collection("transactions")
+                    .aggregate([
+                        { $sort: { createdAt: -1, paidAt: -1 } },
+                        {
+                            $lookup: {
+                                from: "user",
+                                localField: "customerId",
+                                foreignField: "_id",
+                                as: "customerInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$customerInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                        {
+                            $lookup: {
+                                from: "appointments",
+                                localField: "appointmentId",
+                                foreignField: "_id",
+                                as: "appointmentInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$appointmentInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                        {
+                            $lookup: {
+                                from: "services",
+                                localField: "appointmentInfo.serviceId",
+                                foreignField: "_id",
+                                as: "serviceInfo",
+                            },
+                        },
+                        {
+                            $unwind: {
+                                path: "$serviceInfo",
+                                preserveNullAndEmptyArrays: true,
+                            },
+                        },
+                    ])
+                    .toArray();
+
+                res.json(transactions);
+            } catch (error) {
+                res.status(500).json({ message: "Failed to fetch transactions" });
+            }
+        });
+
         app.listen(PORT, () => {
             console.log(`TrimBook server listening on port ${PORT}`);
         });
