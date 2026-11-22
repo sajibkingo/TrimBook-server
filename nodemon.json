@@ -1,0 +1,10 @@
+{
+    "watch": [
+        "index.js",
+        "middlewares",
+        ".env",
+        "package.json",
+        "package-lock.json",
+        "nodemon.json"
+    ]
+}
